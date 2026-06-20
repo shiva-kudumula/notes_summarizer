@@ -68,11 +68,6 @@ npm install
 npm run dev
 
 
-👨‍💻 Author
-
-Unwrittenpier7
-GitHub: https://github.com/unwrittenpier7
-
 SCREENSHOTS:
 <img width="1890" height="935" alt="image" src="https://github.com/user-attachments/assets/97b60559-ae0b-41a2-baa6-1083b5cba0b6" />
 <img width="1919" height="967" alt="image" src="https://github.com/user-attachments/assets/7c8e19c6-bcb9-4da8-a9ea-91f899b3d70d" />
