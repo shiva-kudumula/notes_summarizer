@@ -18,6 +18,13 @@ const QuizAttempt = require("./models/QuizAttempt.cjs");
 const Activity = require("./models/Activity.cjs");
 
 dotenv.config();
+const requiredEnvironment = ["MONGO_URI", "GEMINI_API_KEY", "JWT_SECRET"];
+if (process.env.NODE_ENV === "production") requiredEnvironment.push("FRONTEND_URL");
+const missingEnvironment = requiredEnvironment.filter((name) => !process.env[name]);
+if (missingEnvironment.length) {
+  console.error(`Missing required environment variables: ${missingEnvironment.join(", ")}`);
+  process.exit(1);
+}
 const app = express();
 const PORT = process.env.PORT || 5000;
 const SOURCE_TEXT_LIMIT = 12000;
@@ -146,6 +153,7 @@ app.delete("/sources/:id", auth, async (req, res) => {
   if (!source) return res.status(404).json({ error: "Source not found." });
   await source.deleteOne();
   await QuizAttempt.deleteMany({ userId: req.user.id, noteId: source._id });
+  await Activity.deleteMany({ userId: req.user.id, sourceId: source._id });
   res.json({ success: true });
 });
 app.post("/sources/:id/ask", auth, async (req, res) => {
@@ -181,7 +189,7 @@ app.post("/sources/:id/assessment/submit", auth, async (req, res) => {
   const source = await findOwnedSource(req.params.id, req.user.id);
   const responses = req.body.responses;
   if (!source) return res.status(404).json({ error: "Source not found." });
-  if (!Array.isArray(responses) || responses.length < 3 || responses.length > 6 || responses.some((item) => !item || typeof item.question !== "string" || typeof item.answer !== "string" || !item.answer.trim())) return res.status(400).json({ error: "Answer every assessment question before submitting." });
+  if (!Array.isArray(responses) || responses.length !== 5 || responses.some((item) => !item || typeof item.question !== "string" || typeof item.answer !== "string" || !item.answer.trim())) return res.status(400).json({ error: "Answer every assessment question before submitting." });
   try {
     const raw = await generateText(`Assess the student's written answers using only the source. Return ONLY JSON: {"score":number,"total":${responses.length},"strengths":["..."],"weakAreas":["..."],"feedback":"brief encouraging feedback"}. Score must be an integer from 0 to ${responses.length}.\n\nSource:\n${promptText(source)}\n\nResponses:\n${JSON.stringify(responses)}`, { responseMimeType: "application/json" });
     const result = JSON.parse(raw);

@@ -1,6 +1,9 @@
-export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+export const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
 export async function api(path, options = {}) {
+  if (!API_URL) {
+    throw new Error("The API URL is not configured. Set VITE_API_URL and redeploy.");
+  }
   const token = localStorage.getItem("token");
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
