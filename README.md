@@ -1,77 +1,53 @@
-# 🧠 NotesGenie
+# NotesGenie
 
-NotesGenie is a full-stack AI-powered study assistant that helps students generate structured notes, diagrams, quizzes, and interactive Q&A from uploaded documents.
+NotesGenie is a source-first AI study app: add a source, ask questions about it, test yourself, and generate notes only when you want them.
 
-It supports authentication, note history, quiz tracking, and a dashboard for managing learning progress.
+## What works
 
----
+- JWT sign-up and login
+- Source library and per-user access control
+- PDF, DOCX, TXT, and image OCR ingestion
+- Source-grounded Ask
+- On-demand quiz generation, timer, scoring, saved attempts, and history
+- Conceptual assessment with saved score plus strengths and revision topics
+- Optional Basic, Detailed, and Cheat Sheet notes with download
 
-## ✨ Features
+Adding a source only extracts and stores readable text. Gemini is called only for Ask, Quiz, Assessment, or Generate Notes.
 
-- 📂 Upload documents (PDF, DOCX, TXT, Images, Audio)
-- 📝 AI-generated structured study notes
-- 🖼️ Auto-generated diagrams (optional)
-- 🧪 Practice quizzes with score tracking
-- ❓ Ask questions based on generated notes
-- 📊 Personal dashboard with stats
-- 🔐 JWT-based authentication
-- ☁️ Deployed frontend & backend
+## Run locally
 
----
+Create `backend/.env` (do not commit it):
 
-## 🏗️ Tech Stack
+```env
+MONGO_URI=your_mongodb_connection_string
+GEMINI_API_KEY=your_gemini_api_key
+JWT_SECRET=a_long_random_secret
+# Optional: deployed frontend origin for CORS
+FRONTEND_URL=https://your-frontend.example
+```
 
-### Frontend
-- React (Vite)
-- CSS (no Tailwind)
-- Deployed on **Vercel**
+Then run the backend:
 
-### Backend
-- Node.js
-- Express.js
-- MongoDB (Mongoose)
-- OpenAI API
-- Deployed on **Render**
-
----
-
-## 🚀 Live Demo
-
-- **Frontend: https://notesgenie-front.vercel.app
-- **Backend API: https://notesgenie-backend.onrender.com  
-
----
-
-## 📁 Project Structure
-<img width="311" height="527" alt="image" src="https://github.com/user-attachments/assets/58e76438-8370-4c5e-9398-ef4c85a86e1c" />
-
-
-## 🔐 Environment Variables
-
-Create a `.env` file **(not committed to GitHub)** in `backend/`:
-
-`env
-MONGODB_URI=your_mongodb_connection_string
-OPENAI_API_KEY=your_openai_api_key
-JWT_SECRET=your_jwt_secret`
-
-
-🛠️ TO Run Locally
-Backend
+```powershell
 cd backend
 npm install
-node server.cjs
+npm start
+```
 
-Frontend
+For the frontend, optionally set `frontend/.env` for a deployed API. It defaults to `http://localhost:5000` in development.
+
+```env
+VITE_API_URL=https://your-api.example
+```
+
+```powershell
 cd frontend
 npm install
 npm run dev
+```
 
+## Product flow
 
-SCREENSHOTS:
-<img width="1890" height="935" alt="image" src="https://github.com/user-attachments/assets/97b60559-ae0b-41a2-baa6-1083b5cba0b6" />
-<img width="1919" height="967" alt="image" src="https://github.com/user-attachments/assets/7c8e19c6-bcb9-4da8-a9ea-91f899b3d70d" />
-<img width="1919" height="970" alt="image" src="https://github.com/user-attachments/assets/0a8169fe-0fe1-4a51-a180-27992f62797f" />
+`Add Source → Ask → Quiz / Assessment / Notes`
 
-
-
+Unsupported media, diagrams, audio, and video are intentionally not presented as features. This keeps the MVP focused on the reliable document and image workflow.

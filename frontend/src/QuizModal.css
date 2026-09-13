@@ -50,6 +50,7 @@
   padding: 6px 14px;
   border-radius: 6px;
 }
+.assessment-question { margin: 1.25rem 0; }.assessment-question label { display: block; font-weight: 700; line-height: 1.5; }.assessment-question textarea { width: 100%; margin-top: .65rem; resize: vertical; padding: .75rem; border: 1px solid #d0d5dd; border-radius: 8px; font: inherit; }.assessment-result { line-height: 1.55; }.assessment-result h3 { font-size: 1.8rem; margin-bottom: .25rem; }.assessment-result > div { margin-top: 1rem; padding: .75rem; background: #f9fafb; border-radius: 8px; }.assessment-result ul { margin-bottom: 0; }
 .quiz-header {
   display: flex;
   justify-content: space-between;

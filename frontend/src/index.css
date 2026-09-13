@@ -1,0 +1,7 @@
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #f7f8fc; color: #172033; font-family: Inter, Arial, sans-serif; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .65; }
+.app-loading { padding: 3rem; text-align: center; }
+.page-error { color: #b42318; background: #fef3f2; border: 1px solid #fecdca; border-radius: 8px; padding: .75rem 1rem; }

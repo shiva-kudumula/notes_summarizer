@@ -1,68 +1,18 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import Login from "./Login";
 import Dashboard from "./Dashboard";
 import FileUpload from "./FileUpload";
+import { api } from "./api";
 
 export default function App() {
   const [page, setPage] = useState("loading");
-  const [selectedNoteId, setSelectedNoteId] = useState(null);
-
+  const [selectedSourceId, setSelectedSourceId] = useState(null);
   useEffect(() => {
-    const token = localStorage.getItem("token");
-
-    if (!token) {
-      setPage("login");
-      return;
-    }
-
-    // validate token with backend
-    fetch("https://notesgenie-backend.onrender.com/auth/me", {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-      .then((res) => {
-        if (res.ok) {
-          setPage("dashboard");
-        } else {
-          localStorage.removeItem("token");
-          setPage("login");
-        }
-      })
-      .catch(() => {
-        localStorage.removeItem("token");
-        setPage("login");
-      });
+    if (!localStorage.getItem("token")) return setPage("login");
+    api("/auth/me").then(() => setPage("dashboard")).catch(() => { localStorage.removeItem("token"); setPage("login"); });
   }, []);
-
-  if (page === "loading") {
-    return <p>Loading...</p>;
-  }
-
-  if (page === "login") {
-    return <Login onLogin={() => setPage("dashboard")} />;
-  }
-
-  if (page === "dashboard") {
-    return (
-      <Dashboard
-        onCreateNew={() => {
-          setSelectedNoteId(null);
-          setPage("upload");
-        }}
-        onOpenNote={(id) => {
-          setSelectedNoteId(id);
-          setPage("upload");
-        }}
-      />
-    );
-  }
-
-  // upload page
-  return (
-    <FileUpload
-      selectedNoteId={selectedNoteId}
-      onBack={() => setPage("dashboard")}
-    />
-  );
+  if (page === "loading") return <p className="app-loading">Loading NotesGenie…</p>;
+  if (page === "login") return <Login onLogin={() => setPage("dashboard")} />;
+  if (page === "dashboard") return <Dashboard onAddSource={() => { setSelectedSourceId(null); setPage("source"); }} onOpenSource={(id) => { setSelectedSourceId(id); setPage("source"); }} />;
+  return <FileUpload selectedSourceId={selectedSourceId} onBack={() => setPage("dashboard")} onSourceAdded={(id) => { setSelectedSourceId(id); setPage("source"); }} />;
 }

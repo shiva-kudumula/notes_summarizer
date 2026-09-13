@@ -6,357 +6,212 @@ const path = require("path");
 const dotenv = require("dotenv");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
-const OpenAI = require("openai");
-
-const connectDB = require("./db.cjs");
-const auth = require("./auth.cjs");
-
+const { createWorker } = require("tesseract.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-
+const connectDB = require("./db.cjs");
+const auth = require("./auth.cjs");
+const { generateText, toPublicError } = require("./services/gemini.cjs");
 const User = require("./models/User.cjs");
-const Note = require("./models/Note.cjs");
+const Source = require("./models/Source.cjs");
 const QuizAttempt = require("./models/QuizAttempt.cjs");
+const Activity = require("./models/Activity.cjs");
 
 dotenv.config();
 const app = express();
-
-/* =========================
-   CORS (MUST BE FIRST)
-========================= */
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "https://notesgenie-front.vercel.app"
-    ],
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true
-  })
-  
-);
-//app.options("*", cors());
+const PORT = process.env.PORT || 5000;
+const SOURCE_TEXT_LIMIT = 12000;
+const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+app.use(cors({ origin: ["http://localhost:5173", process.env.FRONTEND_URL].filter(Boolean), methods: ["GET", "POST", "DELETE", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization"] }));
 app.use(express.json());
-
-/* =========================
-   DB
-========================= */
 connectDB();
 
-/* =========================
-   OPENAI
-========================= */
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-/* =========================
-   AUTH CHECK
-========================= */
-app.get("/auth/me", auth, (req, res) => {
-  res.json({ ok: true, userId: req.user.id });
-});
-
-/* =========================
-   MULTER (ALLOW ANY FILE)
-========================= */
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-
-const storage = multer.diskStorage({
-  destination: "uploads/",
-  filename: (req, file, cb) =>
-    cb(null, Date.now() + path.extname(file.originalname))
-});
-
+const uploadDirectory = path.join(__dirname, "uploads");
+fs.mkdirSync(uploadDirectory, { recursive: true });
 const upload = multer({
-  storage,
-  limits: {
-    fileSize: 25 * 1024 * 1024 // 25MB
-  }
+  storage: multer.diskStorage({
+    destination: uploadDirectory,
+    filename: (_req, file, callback) => callback(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`)
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-/* =========================
-   HELPERS
-========================= */
-const toBase64 = (filePath) =>
-  fs.readFileSync(filePath).toString("base64");
+const validId = (value) => /^[0-9a-fA-F]{24}$/.test(value || "");
+const promptText = (source) => source.extractedText.slice(0, SOURCE_TEXT_LIMIT);
+const findOwnedSource = (id, userId) => validId(id) ? Source.findOne({ _id: id, userId }) : null;
 
-/* =========================
-   TEXT EXTRACTION (ALL TYPES)
-========================= */
 async function extractText(file) {
-  const filePath = file.path;
-  const mime = file.mimetype;
   const ext = path.extname(file.originalname).toLowerCase();
-
-  try {
-    // PDF
-    if (mime === "application/pdf" || ext === ".pdf") {
-      const data = await pdfParse(fs.readFileSync(filePath));
-      return data.text;
-    }
-
-    // DOCX
-    if (
-      mime ===
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-      ext === ".docx"
-    ) {
-      const data = await mammoth.extractRawText({ path: filePath });
-      return data.value;
-    }
-
-    // TEXT
-    if (mime.startsWith("text/") || ext === ".txt") {
-      return fs.readFileSync(filePath, "utf-8");
-    }
-
-    // AUDIO
-    if (mime.startsWith("audio/")) {
-      const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(filePath),
-        model: "gpt-4o-mini-transcribe"
-      });
-      return transcription.text || "";
-    }
-
-    // IMAGE (ROBUST CHECK)
-    if (
-      mime.startsWith("image/") ||
-      [".png", ".jpg", ".jpeg", ".webp"].includes(ext)
-    ) {
-      const base64 = toBase64(filePath);
-
-      const resp = await openai.responses.create({
-        model: "gpt-4.1-mini",
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: "Extract all readable text from this image." },
-              {
-                type: "input_image",
-                image_url: `data:${mime};base64,${base64}`
-              }
-            ]
-          }
-        ]
-      });
-
-      return resp.output_text || "";
-    }
-
-    return "";
-  } catch (err) {
-    console.error("❌ Extract error:", err);
-    return "";
+  if (file.mimetype === "application/pdf" || ext === ".pdf") return { type: "pdf", text: (await pdfParse(fs.readFileSync(file.path))).text };
+  if (file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext === ".docx") return { type: "docx", text: (await mammoth.extractRawText({ path: file.path })).value };
+  if (file.mimetype.startsWith("text/") || ext === ".txt") return { type: "text", text: fs.readFileSync(file.path, "utf8") };
+  if (file.mimetype.startsWith("image/") || imageExtensions.has(ext)) {
+    const worker = await createWorker("eng");
+    try { return { type: "image", text: (await worker.recognize(file.path)).data.text }; }
+    finally { await worker.terminate(); }
   }
+  const error = new Error("This file type is not supported. Use PDF, DOCX, TXT, or an image.");
+  error.status = 415;
+  throw error;
 }
 
-/* =========================
-   AUTH ROUTES
-========================= */
+function normalizeQuiz(raw) {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch {
+    const match = raw.match(/\[[\s\S]*\]/);
+    try { parsed = match ? JSON.parse(match[0]) : null; } catch { parsed = null; }
+  }
+  if (!Array.isArray(parsed) || !parsed.length) return null;
+  const questions = parsed.map((item) => {
+    if (!item || typeof item.question !== "string" || !Array.isArray(item.options) || item.options.length !== 4) return null;
+    const options = item.options.map((option) => String(option).trim());
+    if (options.some((option) => !option) || new Set(options).size !== 4) return null;
+    let answer = String(item.answer ?? "").trim();
+    if (/^[A-D]$/i.test(answer)) answer = options[answer.toUpperCase().charCodeAt(0) - 65];
+    if (!options.includes(answer)) return null;
+    return { question: item.question.trim(), options, answer, topic: String(item.topic || "General understanding").trim() };
+  });
+  return questions.every(Boolean) ? questions : null;
+}
+
+async function generateQuestions(source, kind) {
+  const prompt = `Return ONLY a JSON array of 5 multiple-choice questions based exclusively on the source below. Each item must be {"question":"...","options":["...","...","...","..."],"answer":"the complete correct option text","topic":"short topic"}. Use exactly four distinct options. ${kind === "assessment" ? "Make the questions conceptual and reasoning-focused." : "Make the questions useful for self-testing."} Do not use knowledge absent from the source.\n\nSource:\n${promptText(source)}`;
+  const questions = normalizeQuiz(await generateText(prompt, { responseMimeType: "application/json" }));
+  if (!questions) {
+    const error = new Error("The AI returned an invalid question set. Please try again.");
+    error.status = 502;
+    throw error;
+  }
+  return questions;
+}
+
+function normalizeAssessment(raw) {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length !== 5) return null;
+  const questions = parsed.map((item) => {
+    if (!item || typeof item.question !== "string" || item.question.trim().length < 8) return null;
+    return { question: item.question.trim(), topic: String(item.topic || "General understanding").trim() };
+  });
+  return questions.every(Boolean) ? questions : null;
+}
+
+async function generateAssessment(source) {
+  const raw = await generateText(`Return ONLY a JSON array of exactly 5 short-answer assessment questions based exclusively on this source. Each item must be {"question":"...","topic":"short topic"}. Questions must test conceptual understanding and reasoning, not simple memorization.\n\nSource:\n${promptText(source)}`, { responseMimeType: "application/json" });
+  const questions = normalizeAssessment(raw);
+  if (!questions) { const error = new Error("The AI returned an invalid assessment. Please try again."); error.status = 502; throw error; }
+  return questions;
+}
+
+function sendAiError(res, error) {
+  const publicError = toPublicError(error);
+  return res.status(publicError.status).json({ error: publicError.message });
+}
+
+app.get("/auth/me", auth, (req, res) => res.json({ ok: true, userId: req.user.id }));
 app.post("/auth/signup", async (req, res) => {
-  const { email, password } = req.body;
-
-  if (await User.findOne({ email }))
-    return res.status(400).json({ error: "User exists" });
-
-  const hashed = await bcrypt.hash(password, 10);
-  await User.create({ email, password: hashed });
-
-  res.json({ success: true });
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  if (!email || password.length < 6) return res.status(400).json({ error: "Use a valid email and a password of at least 6 characters." });
+  if (await User.findOne({ email })) return res.status(400).json({ error: "An account with this email already exists." });
+  await User.create({ email, password: await bcrypt.hash(password, 10) });
+  res.status(201).json({ success: true });
 });
-
 app.post("/auth/login", async (req, res) => {
-  const { email, password } = req.body;
-
-  const user = await User.findOne({ email });
-  if (!user) return res.status(401).json({ error: "Invalid credentials" });
-
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
-  res.json({ token });
-});
-// ======================
-// QUIZ HISTORY PER NOTE
-// ======================
-app.get("/quiz/history/:noteId", auth, async (req, res) => {
-  const { noteId } = req.params;
-
-  // validate ObjectId
-  if (!noteId.match(/^[0-9a-fA-F]{24}$/)) {
-    return res.status(400).json({ error: "Invalid note id" });
-  }
-
-  const attempts = await QuizAttempt.find({
-    userId: req.user.id,
-    noteId
-  }).sort({ createdAt: -1 });
-
-  res.json(attempts);
+  const user = await User.findOne({ email: String(req.body.email || "").trim().toLowerCase() });
+  if (!user || !(await bcrypt.compare(String(req.body.password || ""), user.password))) return res.status(401).json({ error: "Invalid email or password." });
+  res.json({ token: jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" }) });
 });
 
-
-/* =========================
-   UPLOAD + NOTES
-========================= */
-app.post("/upload", auth, upload.single("file"), async (req, res) => {
+app.post("/sources", auth, upload.single("file"), async (req, res) => {
   const file = req.file;
-  const { generateDiagram, generateQuiz, studyStyle } = req.body;
-
-  if (!file) return res.status(400).json({ error: "No file uploaded" });
-
+  if (!file) return res.status(400).json({ error: "Choose a file to add as a source." });
   try {
-    const text = await extractText(file);
-
-    if (!text || text.trim().length < 20) {
-      return res.status(400).json({ error: "No readable content found" });
-    }
-
-    const limitedText = text.slice(0, 5000);
-
-    const notesResp = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: `Create ${studyStyle || "basic"} structured notes:\n${limitedText}`
-    });
-
-    const notes = notesResp.output_text || "";
-
-    let diagramUrl = "";
-    if (generateDiagram === "true") {
-      const topicResp = await openai.responses.create({
-        model: "gpt-4.1-mini",
-        input: `Extract ONE diagram topic:\n${notes}`
-      });
-
-      const topic = topicResp.output_text?.trim();
-      if (topic) {
-        const img = await openai.images.generate({
-          model: "gpt-image-1",
-          prompt: `Clean educational diagram of ${topic}`,
-          size: "1024x1024"
-        });
-
-        diagramUrl = `data:image/png;base64,${img.data[0].b64_json}`;
-      }
-    }
-
-    let quiz = [];
-    if (generateQuiz === "true") {
-      const quizResp = await openai.responses.create({
-        model: "gpt-4.1-mini",
-        input: `Return ONLY JSON array of 5 MCQs from notes:\n${notes}`
-      });
-
-      const raw = quizResp.output_text || "";
-      const match = raw.match(/\[[\s\S]*\]/);
-      quiz = match ? JSON.parse(match[0]) : [];
-    }
-
-    const savedNote = await Note.create({
-      userId: req.user.id,
-      fileName: file.originalname,
-      notes,
-      diagramUrl
-    });
-
-    res.json({
-      notes,
-      diagramUrl,
-      quiz,
-      noteId: savedNote._id
-    });
-  } catch (err) {
-    console.error("❌ Upload error:", err);
-    res.status(500).json({ error: "Server failed" });
-  } finally {
-    if (file && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    const extracted = await extractText(file);
+    const text = extracted.text.trim();
+    if (text.length < 20) return res.status(400).json({ error: extracted.type === "image" ? "No readable text was found in this image." : "This source does not contain enough readable text." });
+    const source = await Source.create({ userId: req.user.id, fileName: file.originalname, sourceType: extracted.type, extractedText: text });
+    res.status(201).json({ source });
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || "Unable to process this source." }); }
+  finally { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }
+});
+app.get("/sources", auth, async (req, res) => res.json(await Source.find({ userId: req.user.id }).select("fileName sourceType notes createdAt updatedAt").sort({ createdAt: -1 })));
+app.get("/sources/:id", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(validId(req.params.id) ? 404 : 400).json({ error: validId(req.params.id) ? "Source not found." : "Invalid source id." });
+  res.json(source);
+});
+app.delete("/sources/:id", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  await source.deleteOne();
+  await QuizAttempt.deleteMany({ userId: req.user.id, noteId: source._id });
+  res.json({ success: true });
+});
+app.post("/sources/:id/ask", auth, async (req, res) => {
+  const question = String(req.body.question || "").trim();
+  if (!question) return res.status(400).json({ error: "Enter a question first." });
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  try {
+    const answer = (await generateText(`Answer using only the source content below. If it lacks the answer, say that plainly. Keep the answer helpful and concise.\n\nSource:\n${promptText(source)}\n\nQuestion: ${question}`)) || "The source does not provide enough information to answer that.";
+    await Activity.create({ userId: req.user.id, sourceId: source._id, type: "ask", question, answer });
+    res.json({ answer });
   }
+  catch (error) { sendAiError(res, error); }
 });
-
-/* =========================
-   NOTES
-========================= */
-app.get("/notes/history", auth, async (req, res) => {
-  const notes = await Note.find({ userId: req.user.id })
-    .sort({ createdAt: -1 });
-  res.json(notes);
+app.post("/sources/:id/notes", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  const style = ["basic", "detailed", "cheatsheet"].includes(req.body.style) ? req.body.style : "basic";
+  try {
+    source.notes = await generateText(`Create ${style} study notes from this source. Use headings, concise explanations, and useful bullet points. Do not add information absent from the source.\n\nSource:\n${promptText(source)}`);
+    await source.save();
+    res.json({ notes: source.notes });
+  } catch (error) { sendAiError(res, error); }
 });
-
-app.get("/notes/:id", auth, async (req, res) => {
-  if (!req.params.id.match(/^[0-9a-fA-F]{24}$/))
-    return res.status(400).json({ error: "Invalid ID" });
-
-  const note = await Note.findOne({
-    _id: req.params.id,
-    userId: req.user.id
-  });
-
-  if (!note) return res.status(404).json({ error: "Not found" });
-  res.json(note);
+app.post("/sources/:id/:kind", auth, async (req, res) => {
+  if (!["quiz", "assessment"].includes(req.params.kind)) return res.status(404).json({ error: "Action not found." });
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  try { res.json({ questions: req.params.kind === "assessment" ? await generateAssessment(source) : await generateQuestions(source, "quiz") }); }
+  catch (error) { sendAiError(res, error); }
 });
-
-app.delete("/notes/:id", auth, async (req, res) => {
-  const note = await Note.findOneAndDelete({
-    _id: req.params.id,
-    userId: req.user.id
-  });
-
-  if (!note) return res.status(404).json({ error: "Not found" });
-
-  await QuizAttempt.deleteMany({ noteId: note._id });
-  res.json({ success: true });
+app.post("/sources/:id/assessment/submit", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  const responses = req.body.responses;
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  if (!Array.isArray(responses) || responses.length < 3 || responses.length > 6 || responses.some((item) => !item || typeof item.question !== "string" || typeof item.answer !== "string" || !item.answer.trim())) return res.status(400).json({ error: "Answer every assessment question before submitting." });
+  try {
+    const raw = await generateText(`Assess the student's written answers using only the source. Return ONLY JSON: {"score":number,"total":${responses.length},"strengths":["..."],"weakAreas":["..."],"feedback":"brief encouraging feedback"}. Score must be an integer from 0 to ${responses.length}.\n\nSource:\n${promptText(source)}\n\nResponses:\n${JSON.stringify(responses)}`, { responseMimeType: "application/json" });
+    const result = JSON.parse(raw);
+    if (!Number.isInteger(result.score) || result.score < 0 || result.score > responses.length || !Array.isArray(result.strengths) || !Array.isArray(result.weakAreas)) throw new Error("The AI returned an invalid assessment result.");
+    await QuizAttempt.create({ userId: req.user.id, noteId: source._id, score: result.score, total: responses.length, answers: Object.fromEntries(responses.map((item, index) => [index, item.answer])), attemptType: "assessment" });
+    await Activity.create({ userId: req.user.id, sourceId: source._id, type: "assessment", score: result.score, total: responses.length });
+    res.json({ score: result.score, total: responses.length, strengths: result.strengths.slice(0, 4), weakAreas: result.weakAreas.slice(0, 4), feedback: String(result.feedback || "Review the suggested areas and try again.") });
+  } catch (error) { sendAiError(res, error); }
 });
-
-/* =========================
-   QUIZ
-========================= */
 app.post("/quiz/submit", auth, async (req, res) => {
-  const { score, total, answers, noteId } = req.body;
-
-  await QuizAttempt.create({
-    userId: req.user.id,
-    noteId,
-    score,
-    total,
-    answers
-  });
-
-  res.json({ success: true });
+  const { score, total, answers, noteId, attemptType = "quiz" } = req.body;
+  if (!validId(noteId) || !["quiz", "assessment"].includes(attemptType) || !Number.isInteger(score) || !Number.isInteger(total) || score < 0 || total < 1 || score > total || !answers || typeof answers !== "object") return res.status(400).json({ error: "Invalid quiz attempt." });
+  if (!(await findOwnedSource(noteId, req.user.id))) return res.status(404).json({ error: "Source not found." });
+  await QuizAttempt.create({ userId: req.user.id, noteId, score, total, answers, attemptType });
+  await Activity.create({ userId: req.user.id, sourceId: noteId, type: attemptType, score, total });
+  res.status(201).json({ success: true });
 });
-
+app.get("/sources/:id/activity", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.id, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  res.json(await Activity.find({ userId: req.user.id, sourceId: source._id }).sort({ createdAt: -1 }).limit(50));
+});
+app.get("/quiz/history/:sourceId", auth, async (req, res) => {
+  const source = await findOwnedSource(req.params.sourceId, req.user.id);
+  if (!source) return res.status(404).json({ error: "Source not found." });
+  res.json(await QuizAttempt.find({ userId: req.user.id, noteId: source._id }).sort({ createdAt: -1 }));
+});
 app.get("/dashboard/stats", auth, async (req, res) => {
   const attempts = await QuizAttempt.find({ userId: req.user.id });
-
-  res.json({
-    totalNotes: await Note.countDocuments({ userId: req.user.id }),
-    totalAttempts: attempts.length,
-    bestScore: Math.max(0, ...attempts.map(a => a.score || 0))
-  });
+  res.json({ totalSources: await Source.countDocuments({ userId: req.user.id }), totalAttempts: attempts.length, bestScore: Math.max(0, ...attempts.map((attempt) => attempt.score || 0)) });
 });
-
-/* =========================
-   ASK NOTES
-========================= */
-app.post("/ask", auth, async (req, res) => {
-  const { question, notes } = req.body;
-
-  const resp = await openai.responses.create({
-    model: "gpt-4.1-mini",
-    input: `Answer strictly from notes:\n${notes}\nQ:${question}`
-  });
-
-  res.json({ answer: resp.output_text || "" });
-});
-
-/* ========================= */
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () =>
-  console.log(`✅ Backend running on port ${PORT}`)
-);
-/* ========================= */
+app.use((error, _req, res, _next) => res.status(error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE" ? 413 : 500).json({ error: error instanceof multer.MulterError ? "This file is too large. The maximum size is 25 MB." : "Unable to complete this request." }));
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
